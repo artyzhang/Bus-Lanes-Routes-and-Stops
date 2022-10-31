@@ -2,6 +2,8 @@
 import arcpy 
 import pandas as pd
 
+'''Part 1: Run one-to-many spatial join'''
+
 def make_field_map(inputDataset, sourceField): # Make a single field as a field map object
     fmap = arcpy.FieldMap()
     # Add source field as input field
@@ -37,10 +39,12 @@ lane_segments = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\Bus_Lanes
 bus_stops = r'C:\Users\1280530\GIS\GTFS to Feature Class\Points_Near.gdb\bus_patternstops_202206'
 # Define the fields we want joined
 tojoinfields = ['street','segmentid','facility', 'hours','routes_ser', 'routes_nod']
-out_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\stops_buslanes_manyjoin_test'
+spatialjoin_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\stops_buslanes_manyjoin_test'
 
 # Run the spatial join
-runspatialjoin(bus_stops, lane_segments, tojoinfields, out_fc)
+#runspatialjoin(bus_stops, lane_segments, tojoinfields, spatialjoin_fc)
+
+'''Part 2: Write spatial join results to dataframe and verify that route name and direction is correct'''
 
 def fc_to_df(fc): # Write feature class to a dataframe
     fields = [f.name for f in arcpy.ListFields(fc)]
@@ -54,7 +58,7 @@ def fc_to_df(fc): # Write feature class to a dataframe
     return pd.DataFrame(dfconstruct)
 
 # Run the fc to dataframe script
-df = fc_to_df(out_fc)
+df = fc_to_df(spatialjoin_fc)
 
 def returndirection(value): # See if direction is in a string
     directions = ['NB','SB','EB','WB']
@@ -84,6 +88,8 @@ def filteronlymatching(df): # Make sure only matching route and direction fields
 # Run the new fields and filtering process
 newfield_df = make_newfields(df)
 filter_df = filteronlymatching(newfield_df)
+
+''' Part 3: Dissolve the muliple joined values for each stop into one, then write results to the original stop database'''
 
 def unique_values_by_id(df, idcolumn, valuescolumn): # Take a many to one join and return unique join values
     unique_dict = {}
@@ -120,38 +126,37 @@ def dissolve_many_join(df, join_id, groupfields, mergefields): # Take a many to 
 # Run the dissolve process
 groupfields = ['TARGET_FID','stop_id','route_name','facility','street']
 mergefields = ['segmentid']
-tojoin_df = dissolve_many_join(filter_df,groupfields, mergefields)
+tojoin_df = dissolve_many_join(filter_df,'TARGET_FID', groupfields, mergefields)
 
 # Create new "joined" feature class 
-outjoin_fc = r'C:\Users\1280530\GIS\GTFS to Feature Class\Bus_Lanes.gdb\busstops_inlanes_joined'
-arcpy.management.CopyFeatures(bus_stops, outjoin_fc)
-
-# Add fields
-joinfields = ['OBJECTID','facility','street','segmentid']
+newjoined_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\Stops_In_Lanes_202206'
+arcpy.management.CopyFeatures(bus_stops, newjoined_fc)
 
 def addfcfields(fc_path, newfields):
-    existingcols = [f.name for f in arcpy.ListFields(fc_path)]
+    existing = [f.name for f in arcpy.ListFields(fc_path) if f.name != 'OBJECTID']
+    existingcols = ['OID@'] + existing
     # Check that new fields don't already exist
     fieldstoadd = [[n, 'TEXT', n, 1000, ''] for n in newfields if n not in existingcols]
     # Add new fields 
     if len(fieldstoadd) > 0:
         arcpy.management.AddFields(fc_path, fieldstoadd)
 
-addfcfields(outjoin_fc, joinfields)
+# Add fields
+joinfields = ['OID@','facility','street','segmentid']
+addfcfields(newjoined_fc, joinfields)
 
-# Write values to add into dictionary
+# Write values into a dictionary
 def to_dict2(df, indexfield):
     return df.groupby(indexfield).first().to_dict('index')
 
 joindict = to_dict2(tojoin_df, 'TARGET_FID')
 
 # Join the spatial join values to the new feature class
-with arcpy.da.UpdateCursor(out_fc,joinfields) as cursor:
+with arcpy.da.UpdateCursor(newjoined_fc,joinfields) as cursor:
     for row in cursor:
-        for f in joinfields:
-            fid = row[0]
-            if row[0] in joindict.keys():
-                row[1] = joindict[fid]['facility']
-                row[2] = joindict[fid]['street']
-                row[3] = ' '.join([str(x) for x in joindict[fid]['segmentid']])
-            cursor.updateRow(row)
+        fid = row[0]
+        if fid in joindict.keys():
+            row[1] = joindict[fid]['facility']
+            row[2] = joindict[fid]['street']
+            row[3] = ' '.join([str(x) for x in joindict[fid]['segmentid']])
+        cursor.updateRow(row)
