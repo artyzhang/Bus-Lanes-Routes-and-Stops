@@ -35,6 +35,7 @@ def runspatialjoin(leftfc, rightfc, rightfieldstojoin, outfc):
     arcpy.analysis.SpatialJoin(bus_stops, lane_segments, outfc, join_operation='JOIN_ONE_TO_MANY',join_type='KEEP_COMMON',field_mapping=fieldmappings,
     match_option='WITHIN_A_DISTANCE',search_radius='80 FEET')
 
+# Define the bus lane segment fc and bus stops fc
 lane_segments = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\Bus_Lanes_Segments'
 bus_stops = r'C:\Users\1280530\GIS\GTFS to Feature Class\Points_Near.gdb\bus_patternstops_202206'
 # Define the fields we want joined
@@ -42,7 +43,9 @@ tojoinfields = ['street','segmentid','facility', 'hours','routes_ser', 'routes_n
 spatialjoin_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\stops_buslanes_manyjoin_test'
 
 # Run the spatial join
-#runspatialjoin(bus_stops, lane_segments, tojoinfields, spatialjoin_fc)
+if arcpy.Exists(spatialjoin_fc) == False:
+    runspatialjoin(bus_stops, lane_segments, tojoinfields, spatialjoin_fc)
+    print('New spatial join feature class created as: ', spatialjoin_fc)
 
 '''Part 2: Write spatial join results to dataframe and verify that route name and direction is correct'''
 
@@ -57,16 +60,18 @@ def fc_to_df(fc): # Write feature class to a dataframe
             dfconstruct.append(values)
     return pd.DataFrame(dfconstruct)
 
-# Run the fc to dataframe script
-df = fc_to_df(spatialjoin_fc)
-
-def returndirection(value): # See if direction is in a string
-    directions = ['NB','SB','EB','WB']
-    for d in directions:
+def returndirection(value): # Return a direction from a string
+    directions = {'(NB)':'NB','(SB)':'SB','(EB)':'EB','(WB)':'WB'}
+    matches = []
+    for d in directions.keys():
         if d in value:
-            return d
-        else:
-            return 'Both'
+            matches.append(directions[d])
+    if len(matches)==1:
+        return matches[0]
+    elif len(matches)==0:
+        return 'Both'
+    else:
+        return 'Flag'
 
 def make_newfields(df): # Make route name, lane direction, and routes list fields
     # Filter out stop IDs that weren't joined to a bus lane that serves routes
@@ -85,11 +90,13 @@ def filteronlymatching(df): # Make sure only matching route and direction fields
     matcheddirection = matchedroute[matchedroute.apply(lambda x: x['SPA_DIR'] == x['lane_direction'] if x['lane_direction'] != 'Both' else True, axis=1)]
     return matcheddirection
 
+# Run the fc to dataframe script
+df = fc_to_df(spatialjoin_fc)
 # Run the new fields and filtering process
 newfield_df = make_newfields(df)
 filter_df = filteronlymatching(newfield_df)
 
-''' Part 3: Dissolve the muliple joined values for each stop into one, then write results to the original stop database'''
+''' Part 3: Dissolve the muliple joined values for each stop into one'''
 
 def unique_values_by_id(df, idcolumn, valuescolumn): # Take a many to one join and return unique join values
     unique_dict = {}
@@ -128,9 +135,7 @@ groupfields = ['TARGET_FID','stop_id','route_name','facility','street']
 mergefields = ['segmentid']
 tojoin_df = dissolve_many_join(filter_df,'TARGET_FID', groupfields, mergefields)
 
-# Create new "joined" feature class 
-newjoined_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\Stops_In_Lanes_202206'
-arcpy.management.CopyFeatures(bus_stops, newjoined_fc)
+'''Part 4: Make a copy of the original stop fc, then write join and write data to it'''
 
 def addfcfields(fc_path, newfields):
     existing = [f.name for f in arcpy.ListFields(fc_path) if f.name != 'OBJECTID']
@@ -141,22 +146,35 @@ def addfcfields(fc_path, newfields):
     if len(fieldstoadd) > 0:
         arcpy.management.AddFields(fc_path, fieldstoadd)
 
-# Add fields
-joinfields = ['OID@','facility','street','segmentid']
-addfcfields(newjoined_fc, joinfields)
-
-# Write values into a dictionary
 def to_dict2(df, indexfield):
     return df.groupby(indexfield).first().to_dict('index')
 
-joindict = to_dict2(tojoin_df, 'TARGET_FID')
+def write_new_field_data_tofc(fc_path, df, join_id, newdatanames):
+    # Add new fields to feature class if they don't exist
+    addfcfields(fc_path, newdatanames)
+    # Convert new data to dictionary
+    joindict = to_dict2(df,join_id)
+    # Join the spatial join values to the new feature class
+    with arcpy.da.UpdateCursor(fc_path, newdatanames) as cursor:
+        for row in cursor:
+            fid = row[0]
+            if fid in joindict.keys():
+                # Add facility
+                row[1] = joindict[fid][newdatanames[1]]
+                # Add street
+                row[2] = joindict[fid][newdatanames[2]]
+                # Add segment id
+                segmentidlist = joindict[fid][newdatanames[3]]
+                row[3] = ' '.join([str(x) for x in segmentidlist])
+            cursor.updateRow(row)
 
-# Join the spatial join values to the new feature class
-with arcpy.da.UpdateCursor(newjoined_fc,joinfields) as cursor:
-    for row in cursor:
-        fid = row[0]
-        if fid in joindict.keys():
-            row[1] = joindict[fid]['facility']
-            row[2] = joindict[fid]['street']
-            row[3] = ' '.join([str(x) for x in joindict[fid]['segmentid']])
-        cursor.updateRow(row)
+# Create a copy of the original stop fc
+newjoined_fc = r'C:\Users\1280530\GIS\Bus Lanes\01_Data\Bus_Lanes.gdb\Stops_In_Lanes_202206'
+if arcpy.Exists(newjoined_fc) == False:
+    arcpy.management.CopyFeatures(bus_stops, newjoined_fc)
+    print('New stops feature class created as: ', newjoined_fc)
+
+# Define add fields. First field needs to be object ID
+ndatafields = ['OID@','facility','street','segmentid']
+# Run the write data function
+write_new_field_data_tofc(newjoined_fc, tojoin_df, 'TARGET_FID', ndatafields)
